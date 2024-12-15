@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'dart:math';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 void main() {
   runApp(MyApp());
@@ -58,6 +61,51 @@ class _SplashScreenState extends State<SplashScreen> {
 class LoginPage extends StatelessWidget {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final FlutterSecureStorage _secureStorage = FlutterSecureStorage();
+
+  Future<void> _login(BuildContext context) async {
+    final username = _usernameController.text;
+    final password = _passwordController.text;
+
+    if (username.isEmpty || password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Введите имя пользователя и пароль')),
+      );
+      return;
+    }
+
+    try {
+      final response = await http.post(
+        Uri.parse('http://127.0.0.1:5000/api/login'), // Локальный адрес Flask-сервера
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'username': username, 'password': password}),
+      );
+
+
+      if (response.statusCode == 200) {
+        final responseData = jsonDecode(response.body);
+        final token = responseData['token'];
+
+        // Сохраняем токен
+        await _secureStorage.write(key: 'auth_token', value: token);
+
+        // Переход на следующий экран
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (context) => CreditPage()),
+        );
+      } else {
+        // Ошибка авторизации
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка: ${response.body}')),
+        );
+      }
+    } catch (e) {
+      // Ошибка сети
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Ошибка сети: $e')),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -80,11 +128,7 @@ class LoginPage extends StatelessWidget {
             ),
             SizedBox(height: 20),
             ElevatedButton(
-              onPressed: () {
-                Navigator.of(context).pushReplacement(
-                  MaterialPageRoute(builder: (context) => CreditPage()),
-                );
-              },
+              onPressed: () => _login(context),
               child: Text('Войти'),
             ),
           ],
@@ -244,6 +288,7 @@ class _CreditDetailsPageState extends State<CreditDetailsPage> {
             Text(
                 'Итоговая переплата: ${widget.credit.calculateOverallOverpayment().toStringAsFixed(2)} %'),
             SizedBox(height: 20),
+
             // Кнопка для изменения процентной ставки
             ElevatedButton(
               onPressed: () {
@@ -624,6 +669,47 @@ class Credit {
     required this.firstPaymentType,
     required this.isPrepaymentAllowed,
   });
+
+  List<Map<String, dynamic>> calculatePaymentSchedule() {
+    List<Map<String, dynamic>> schedule = [];
+    double remainingBalance = creditAmount;
+    DateTime paymentDate = issueDate.add(Duration(days: 30)); // Первый платеж через 30 дней
+
+    for (int i = 1; i <= durationMonths; i++) {
+      double interestPayment;
+      double principalPayment;
+      double monthlyPayment;
+
+      if (paymentType == 'аннуитетный') {
+        double monthlyRate = (interestRate / 100) / 12;
+        monthlyPayment = remainingBalance *
+            (monthlyRate +
+                (monthlyRate / (1 - (1 / pow(1 + monthlyRate, durationMonths)))));
+        interestPayment = remainingBalance * monthlyRate;
+        principalPayment = monthlyPayment - interestPayment;
+      } else if (paymentType == 'дифференцированный') {
+        principalPayment = creditAmount / durationMonths;
+        interestPayment = remainingBalance * (interestRate / 100) * 30 / 365;
+        monthlyPayment = principalPayment + interestPayment;
+      } else {
+        throw Exception('Неизвестный тип платежа');
+      }
+
+      schedule.add({
+        'number': i,
+        'date': paymentDate,
+        'payment': monthlyPayment,
+        'principal': principalPayment,
+        'interest': interestPayment,
+        'remainingBalance': remainingBalance - principalPayment,
+      });
+
+      remainingBalance -= principalPayment;
+      paymentDate = paymentDate.add(Duration(days: 30));
+    }
+
+    return schedule;
+  }
 
   // Расчет ежемесячного платежа с возможностью передачи новой ставки
   double calculateMonthlyPayment({double? newRate}) {
